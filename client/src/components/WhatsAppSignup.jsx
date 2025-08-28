@@ -6,11 +6,18 @@ const WhatsAppSignup = ({ onSignupComplete }) => {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
+  const [sdkReady, setSdkReady] = useState(false); // Track SDK readiness
 
   useEffect(() => {
     // Load Facebook SDK
     const loadFacebookSDK = () => {
-      if (document.getElementById('facebook-jssdk')) return;
+      if (document.getElementById('facebook-jssdk')) {
+        // SDK already loaded, check if FB is available
+        if (window.FB) {
+          setSdkReady(true);
+        }
+        return;
+      }
       
       const script = document.createElement('script');
       script.id = 'facebook-jssdk';
@@ -27,11 +34,15 @@ const WhatsAppSignup = ({ onSignupComplete }) => {
     // Initialize Facebook SDK
     window.fbAsyncInit = function() {
       window.FB.init({
-        appId: process.env.REACT_APP_META_APP_ID,
+        appId: import.meta.env.VITE_META_APP_ID,
         autoLogAppEvents: true,
         xfbml: true,
         version: 'v23.0'
       });
+      
+      // Mark SDK as ready after initialization
+      setSdkReady(true);
+      console.log('Facebook SDK initialized successfully');
     };
 
     // Message event listener for session logging
@@ -43,12 +54,21 @@ const WhatsAppSignup = ({ onSignupComplete }) => {
         if (data.type === 'WA_EMBEDDED_SIGNUP') {
           console.log('Embedded Signup Event:', data);
           
-          if (data.event === 'CANCEL') {
+          if (data.event === 'FINISH') {
+            // Handle successful completion
+            handleCompleteSignup({
+              waba_id: data.data.waba_id,
+              phone_number_id: data.data.phone_number_id,
+              business_id: data.data.business_id,
+              code: window.embeddedSignupCode
+            });
+          } else if (data.event === 'CANCEL') {
             if (data.data.current_step) {
               setError(`Flow abandoned at: ${data.data.current_step}`);
             } else if (data.data.error_message) {
               setError(`Error: ${data.data.error_message}`);
             }
+            setIsLoading(false);
           }
         }
       } catch (err) {
@@ -63,16 +83,16 @@ const WhatsAppSignup = ({ onSignupComplete }) => {
     };
   }, []);
 
-  const fbLoginCallback = async (response) => {
+  const fbLoginCallback = (response) => {
     setIsLoading(false);
     
     if (response.authResponse) {
       const code = response.authResponse.code;
       console.log('Authorization code received:', code);
       
-      // The message event should also fire with the WABA and phone number IDs
-      // We'll handle the token exchange when we receive those
-      setSuccess('Authorization successful! Processing...');
+      // Store the code globally to use with message event data
+      window.embeddedSignupCode = code;
+      setSuccess('Authorization successful! Please wait for the final setup...');
     } else {
       console.error('Login failed:', response);
       setError('Authorization failed. Please try again.');
@@ -80,8 +100,15 @@ const WhatsAppSignup = ({ onSignupComplete }) => {
   };
 
   const launchWhatsAppSignup = () => {
-    if (!window.FB) {
-      setError('Facebook SDK not loaded. Please refresh and try again.');
+    // Check if SDK is ready
+    if (!sdkReady || !window.FB) {
+      setError('Facebook SDK not ready yet. Please wait a moment and try again.');
+      return;
+    }
+
+    // Validate environment variables
+    if (!import.meta.env.VITE_META_APP_ID || !import.meta.env.VITE_META_CONFIGURATION_ID) {
+      setError('Missing Meta app configuration. Please check your environment variables.');
       return;
     }
 
@@ -89,13 +116,18 @@ const WhatsAppSignup = ({ onSignupComplete }) => {
     setError(null);
     setSuccess(null);
 
+    console.log('Launching WhatsApp signup with config:', {
+      appId: import.meta.env.VITE_META_APP_ID,
+      configId: import.meta.env.VITE_META_CONFIGURATION_ID
+    });
+
     window.FB.login(fbLoginCallback, {
-      config_id: process.env.VITE_META_CONFIGURATION_ID,
+      config_id: import.meta.env.VITE_META_CONFIGURATION_ID,
       response_type: 'code',
       override_default_response_type: true,
       extras: {
         setup: {},
-        featureType: '', // Empty for default flow
+        featureType: '',
         sessionInfoVersion: '3'
       }
     });
@@ -104,8 +136,11 @@ const WhatsAppSignup = ({ onSignupComplete }) => {
   // Handle the complete flow data (called from message event)
   const handleCompleteSignup = async (signupData) => {
     try {
+      setIsLoading(true);
+      console.log('Completing signup with data:', signupData);
+      
       const result = await exchangeToken({
-        code: signupData.code, // You'll need to capture this from the callback
+        code: signupData.code,
         wabaId: signupData.waba_id,
         phoneNumberId: signupData.phone_number_id,
         businessPortfolioId: signupData.business_id
@@ -116,7 +151,10 @@ const WhatsAppSignup = ({ onSignupComplete }) => {
         onSignupComplete(result);
       }
     } catch (error) {
+      console.error('Onboarding error:', error);
       setError(`Onboarding failed: ${error.message}`);
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -126,35 +164,41 @@ const WhatsAppSignup = ({ onSignupComplete }) => {
       <p>Set up WhatsApp messaging for your business in just a few clicks.</p>
       
       {error && (
-        <div className="alert alert-error">
+        <div style={{ color: 'red', padding: '10px', margin: '10px 0', border: '1px solid red', borderRadius: '4px' }}>
           {error}
         </div>
       )}
       
       {success && (
-        <div className="alert alert-success">
+        <div style={{ color: 'green', padding: '10px', margin: '10px 0', border: '1px solid green', borderRadius: '4px' }}>
           {success}
+        </div>
+      )}
+      
+      {!sdkReady && (
+        <div style={{ color: 'orange', padding: '10px', margin: '10px 0', border: '1px solid orange', borderRadius: '4px' }}>
+          Loading Facebook SDK...
         </div>
       )}
       
       <button 
         onClick={launchWhatsAppSignup}
-        disabled={isLoading}
+        disabled={isLoading || !sdkReady}
         style={{
           backgroundColor: '#1877f2',
           border: 0,
           borderRadius: '4px',
           color: '#fff',
-          cursor: isLoading ? 'not-allowed' : 'pointer',
+          cursor: (isLoading || !sdkReady) ? 'not-allowed' : 'pointer',
           fontFamily: 'Helvetica, Arial, sans-serif',
           fontSize: '16px',
           fontWeight: 'bold',
           height: '40px',
           padding: '0 24px',
-          opacity: isLoading ? 0.6 : 1
+          opacity: (isLoading || !sdkReady) ? 0.6 : 1
         }}
       >
-        {isLoading ? 'Loading...' : 'Connect WhatsApp Business'}
+        {isLoading ? 'Processing...' : !sdkReady ? 'Loading SDK...' : 'Connect WhatsApp Business'}
       </button>
       
       <div className="signup-info">
