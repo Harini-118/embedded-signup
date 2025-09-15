@@ -6,210 +6,179 @@ const WhatsAppSignup = ({ onSignupComplete }) => {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
-  const [sdkReady, setSdkReady] = useState(false); // Track SDK readiness
+  const [sdkReady, setSdkReady] = useState(false);
+  const [onboardingComplete, setOnboardingComplete] = useState(false);
 
+  // REFACTORED: Use a single state object to collect all required data
+  const [signupData, setSignupData] = useState({
+    code: null,
+    wabaId: null,
+    phoneNumberId: null,
+    businessId: null,
+  });
+
+  // Hardcoded values from your original code
+  const APP_ID = '1213807479723042';
+  const CONFIGURATION_ID = '1411808236443131';
+
+  // Load Facebook SDK
   useEffect(() => {
-    // Load Facebook SDK
     const loadFacebookSDK = () => {
       if (document.getElementById('facebook-jssdk')) {
-        // SDK already loaded, check if FB is available
-        if (window.FB) {
-          setSdkReady(true);
-        }
+        if (window.FB) setSdkReady(true);
         return;
       }
-      
       const script = document.createElement('script');
       script.id = 'facebook-jssdk';
       script.src = 'https://connect.facebook.net/en_US/sdk.js';
       script.async = true;
       script.defer = true;
       script.crossOrigin = 'anonymous';
-      
       document.body.appendChild(script);
+    };
+
+    window.fbAsyncInit = function() {
+      window.FB.init({
+        appId: APP_ID,
+        autoLogAppEvents: true,
+        xfbml: true,
+        version: 'v21.0' // Use a specific, non-beta version
+      });
+      setSdkReady(true);
+      console.log('Facebook SDK initialized.');
     };
 
     loadFacebookSDK();
 
-    // Initialize Facebook SDK
-    window.fbAsyncInit = function() {
-      window.FB.init({
-        appId: import.meta.env.VITE_META_APP_ID,
-        autoLogAppEvents: true,
-        xfbml: true,
-        version: 'v23.0'
-      });
-      
-      // Mark SDK as ready after initialization
-      setSdkReady(true);
-      console.log('Facebook SDK initialized successfully');
-    };
-
-    // Message event listener for session logging
+    // Event listener for data from the Embedded Signup popup
     const handleMessage = (event) => {
       if (!event.origin.endsWith('facebook.com')) return;
-      
       try {
         const data = JSON.parse(event.data);
         if (data.type === 'WA_EMBEDDED_SIGNUP') {
-          console.log('Embedded Signup Event:', data);
-          
+          console.log('Embedded Signup Event Received:', data);
           if (data.event === 'FINISH') {
-            // Handle successful completion
-            handleCompleteSignup({
-              waba_id: data.data.waba_id,
-              phone_number_id: data.data.phone_number_id,
-              business_id: data.data.business_id,
-              code: window.embeddedSignupCode
-            });
+            setSignupData((prev) => ({
+              ...prev,
+              wabaId: data.data.waba_id,
+              phoneNumberId: data.data.phone_number_id,
+              businessId: data.data.business_id,
+            }));
           } else if (data.event === 'CANCEL') {
-            if (data.data.current_step) {
-              setError(`Flow abandoned at: ${data.data.current_step}`);
-            } else if (data.data.error_message) {
-              setError(`Error: ${data.data.error_message}`);
-            }
+            const errorMessage = data.data?.error_message || `Flow abandoned at step: ${data.data?.current_step}`;
+            setError(`Signup Cancelled: ${errorMessage}`);
             setIsLoading(false);
           }
         }
       } catch (err) {
-        console.log('Message event:', event.data);
+        console.warn('Could not parse message from Facebook:', event.data);
       }
     };
-
     window.addEventListener('message', handleMessage);
-
-    return () => {
-      window.removeEventListener('message', handleMessage);
-    };
+    return () => window.removeEventListener('message', handleMessage);
   }, []);
 
-  const fbLoginCallback = (response) => {
-    setIsLoading(false);
-    
-    if (response.authResponse) {
-      const code = response.authResponse.code;
-      console.log('Authorization code received:', code);
-      
-      // Store the code globally to use with message event data
-      window.embeddedSignupCode = code;
-      setSuccess('Authorization successful! Please wait for the final setup...');
-    } else {
-      console.error('Login failed:', response);
-      setError('Authorization failed. Please try again.');
+  // NEW: This useEffect hook reliably triggers the final step once all data is collected
+  useEffect(() => {
+    // Check if all required pieces of data are available
+    if (signupData.code && signupData.wabaId && signupData.phoneNumberId) {
+      console.log('All required data is present. Calling backend to complete onboarding...');
+      handleCompleteSignup(signupData);
     }
-  };
+  }, [signupData]); // This effect runs whenever signupData changes
 
-  const launchWhatsAppSignup = () => {
-    // Check if SDK is ready
-    if (!sdkReady || !window.FB) {
-      setError('Facebook SDK not ready yet. Please wait a moment and try again.');
-      return;
-    }
 
-    // Validate environment variables
-    if (!import.meta.env.VITE_META_APP_ID || !import.meta.env.VITE_META_CONFIGURATION_ID) {
-      setError('Missing Meta app configuration. Please check your environment variables.');
-      return;
-    }
-
+  const handleCompleteSignup = async (data) => {
     setIsLoading(true);
     setError(null);
-    setSuccess(null);
-
-    console.log('Launching WhatsApp signup with config:', {
-      appId: import.meta.env.VITE_META_APP_ID,
-      configId: import.meta.env.VITE_META_CONFIGURATION_ID
-    });
-
-    window.FB.login(fbLoginCallback, {
-      config_id: import.meta.env.VITE_META_CONFIGURATION_ID,
-      response_type: 'code',
-      override_default_response_type: true,
-      extras: {
-        setup: {},
-        featureType: '',
-        sessionInfoVersion: '3'
-      }
-    });
-  };
-
-  // Handle the complete flow data (called from message event)
-  const handleCompleteSignup = async (signupData) => {
     try {
-      setIsLoading(true);
-      console.log('Completing signup with data:', signupData);
-      
       const result = await exchangeToken({
-        code: signupData.code,
-        wabaId: signupData.waba_id,
-        phoneNumberId: signupData.phone_number_id,
-        businessPortfolioId: signupData.business_id
+        code: data.code,
+        wabaId: data.wabaId,
+        phoneNumberId: data.phoneNumberId,
+        businessPortfolioId: data.businessId,
       });
 
-      setSuccess('Customer onboarded successfully!');
+      setSuccess('Account connected! Please complete the final step.');
+      setOnboardingComplete(true); // Show the payment method instructions
       if (onSignupComplete) {
         onSignupComplete(result);
       }
     } catch (error) {
       console.error('Onboarding error:', error);
-      setError(`Onboarding failed: ${error.message}`);
+      setError(`Onboarding failed: ${error.message}. Check the console for details.`);
     } finally {
       setIsLoading(false);
     }
   };
 
+  const launchWhatsAppSignup = () => {
+    if (!sdkReady || !window.FB) {
+      setError('Facebook SDK is not ready. Please wait a moment and try again.');
+      return;
+    }
+    
+    setIsLoading(true);
+    setError(null);
+    setSuccess(null);
+    setOnboardingComplete(false);
+    setSignupData({ code: null, wabaId: null, phoneNumberId: null, businessId: null });
+
+    window.FB.login(
+      (response) => {
+        if (response.authResponse && response.authResponse.code) {
+          console.log('Authorization code received from FB.login:', response.authResponse.code);
+          // Just update the state. The useEffect will handle the rest.
+          setSignupData((prev) => ({ ...prev, code: response.authResponse.code }));
+        } else {
+          console.error('Login failed or authorization denied:', response);
+          setError('Authorization failed. Please try again.');
+          setIsLoading(false);
+        }
+      },
+      {
+        config_id: CONFIGURATION_ID,
+        response_type: 'code',
+        override_default_response_type: true,
+        extras: {
+          sessionInfoVersion: '2', // Use a stable version
+        },
+      }
+    );
+  };
+
   return (
     <div className="whatsapp-signup">
       <h2>Connect Your WhatsApp Business Account</h2>
-      <p>Set up WhatsApp messaging for your business in just a few clicks.</p>
       
-      {error && (
-        <div style={{ color: 'red', padding: '10px', margin: '10px 0', border: '1px solid red', borderRadius: '4px' }}>
-          {error}
+      {error && <div style={{ color: 'red', border: '1px solid red', padding: '10px', margin: '10px 0' }}>{error}</div>}
+      {success && <div style={{ color: 'green', border: '1px solid green', padding: '10px', margin: '10px 0' }}>{success}</div>}
+
+      {onboardingComplete ? (
+        <div style={{ marginTop: '20px', padding: '15px', border: '1px solid green', borderRadius: '5px' }}>
+          <h3>Final Step: Add a Payment Method</h3>
+          <p>Your phone number is now connected. To send messages beyond the free monthly limit, you must add a payment method in your WhatsApp Manager.</p>
+          <a
+            href={`https://business.facebook.com/wa/manage/phone-numbers/${signupData.phoneNumberId}/`}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ fontWeight: 'bold', color: '#1877f2' }}
+          >
+            Click here to go to your WhatsApp Manager and add payment details
+          </a>
         </div>
+      ) : (
+        <>
+          <p>Set up WhatsApp messaging for your business in just a few clicks.</p>
+          <button
+            onClick={launchWhatsAppSignup}
+            disabled={isLoading || !sdkReady}
+            style={{ backgroundColor: '#1877f2', color: '#fff', padding: '10px 20px', border: 'none', borderRadius: '5px', cursor: 'pointer', opacity: (isLoading || !sdkReady) ? 0.6 : 1 }}
+          >
+            {isLoading ? 'Processing...' : !sdkReady ? 'Loading SDK...' : 'Connect with Facebook'}
+          </button>
+        </>
       )}
-      
-      {success && (
-        <div style={{ color: 'green', padding: '10px', margin: '10px 0', border: '1px solid green', borderRadius: '4px' }}>
-          {success}
-        </div>
-      )}
-      
-      {!sdkReady && (
-        <div style={{ color: 'orange', padding: '10px', margin: '10px 0', border: '1px solid orange', borderRadius: '4px' }}>
-          Loading Facebook SDK...
-        </div>
-      )}
-      
-      <button 
-        onClick={launchWhatsAppSignup}
-        disabled={isLoading || !sdkReady}
-        style={{
-          backgroundColor: '#1877f2',
-          border: 0,
-          borderRadius: '4px',
-          color: '#fff',
-          cursor: (isLoading || !sdkReady) ? 'not-allowed' : 'pointer',
-          fontFamily: 'Helvetica, Arial, sans-serif',
-          fontSize: '16px',
-          fontWeight: 'bold',
-          height: '40px',
-          padding: '0 24px',
-          opacity: (isLoading || !sdkReady) ? 0.6 : 1
-        }}
-      >
-        {isLoading ? 'Processing...' : !sdkReady ? 'Loading SDK...' : 'Connect WhatsApp Business'}
-      </button>
-      
-      <div className="signup-info">
-        <h3>What happens next?</h3>
-        <ul>
-          <li>You'll be guided through connecting your WhatsApp Business Account</li>
-          <li>Your business phone number will be verified</li>
-          <li>You'll need to add a payment method to your WhatsApp Business Account</li>
-          <li>Once complete, you can start sending messages through our platform</li>
-        </ul>
-      </div>
     </div>
   );
 };

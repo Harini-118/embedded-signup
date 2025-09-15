@@ -1,218 +1,188 @@
 // server/controllers/whatsappController.js
 const Customer = require('../models/Customer');
 
+// For using fetch in a CommonJS environment (like the default Node.js setup in your code)
+// you need to install node-fetch: npm install node-fetch@2
+const fetch = require('node-fetch');
+
 class WhatsAppController {
+  /**
+   * Handles the core onboarding flow after the user completes the Embedded Signup.
+   * 1. Exchanges the temporary code for a permanent business access token.
+   * 2. Registers the user's phone number with the WhatsApp Cloud API (This changes the status from "Pending" to "Connected").
+   * 3. Subscribes the WhatsApp Business Account (WABA) to the app for webhook notifications.
+   * 4. Saves or updates the customer's details in the database.
+   */
   async exchangeToken(req, res) {
+    console.log('CONTROLLER: Received request on /exchange-token with body:', req.body);
+    const { code, wabaId, phoneNumberId, businessPortfolioId } = req.body;
+
+    if (!code || !wabaId || !phoneNumberId) {
+      return res.status(400).json({
+        error: 'Missing required parameters. `code`, `wabaId`, and `phoneNumberId` are all required.',
+      });
+    }
+
     try {
-      const { code, wabaId, phoneNumberId, businessPortfolioId, customerInfo } = req.body;
-      
-      if (!code || !wabaId || !phoneNumberId) {
-        return res.status(400).json({ 
-          error: 'Missing required parameters: code, wabaId, and phoneNumberId are required' 
-        });
-      }
+      // Step 1: Exchange the temporary code for a permanent business access token
+      console.log('STEP 1: Exchanging authorization code for a business access token...');
+      const tokenUrl = `https://graph.facebook.com/v21.0/oauth/access_token`;
+      const tokenParams = new URLSearchParams({
+          client_id: process.env.META_APP_ID,
+          client_secret: process.env.META_APP_SECRET,
+          code: code,
+      });
 
-      console.log('Processing token exchange:', { wabaId, phoneNumberId });
-
-      // Exchange code for business token
-      const tokenResponse = await fetch(
-        `https://graph.facebook.com/v23.0/oauth/access_token`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            client_id: process.env.META_APP_ID,
-            client_secret: process.env.META_APP_SECRET,
-            code: code
-          })
-        }
-      );
-
-      if (!tokenResponse.ok) {
-        const error = await tokenResponse.json();
-        console.error('Token exchange failed:', error);
-        return res.status(400).json({ 
-          error: 'Failed to exchange token', 
-          details: error 
-        });
-      }
-
+      const tokenResponse = await fetch(`${tokenUrl}?${tokenParams}`);
       const tokenData = await tokenResponse.json();
+
+      if (!tokenResponse.ok || !tokenData.access_token) {
+        console.error('ERROR at STEP 1: Token exchange failed.', tokenData);
+        return res.status(400).json({
+          error: 'Failed to exchange authorization code for a token.',
+          details: tokenData.error?.message || 'No access token was returned by Meta.',
+        });
+      }
       const businessToken = tokenData.access_token;
+      console.log('SUCCESS at STEP 1: Business access token obtained.');
 
-      // Get business phone number details
-      const phoneResponse = await fetch(
-        `https://graph.facebook.com/v23.0/${phoneNumberId}`,
-        {
-          headers: {
-            'Authorization': `Bearer ${businessToken}`
-          }
-        }
-      );
 
-      if (!phoneResponse.ok) {
-        const error = await phoneResponse.json();
-        return res.status(400).json({ 
-          error: 'Failed to get business phone number details', 
-          details: error 
+      // Step 2: Register the phone number for the WhatsApp Cloud API.
+      // THIS IS THE CRITICAL STEP TO CHANGE THE STATUS FROM "PENDING" to "CONNECTED".
+      console.log(`STEP 2: Registering phone number ID (${phoneNumberId}) for the Cloud API...`);
+      const registerUrl = `https://graph.facebook.com/v21.0/${phoneNumberId}/register`;
+      const registerResponse = await fetch(registerUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${businessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp',
+          pin: process.env.WHATSAPP_PIN || '654321', // Use a secure, consistent PIN
+        }),
+      });
+      const registerData = await registerResponse.json();
+
+      if (!registerResponse.ok || !registerData.success) {
+        console.error('ERROR at STEP 2: Phone number registration failed.', registerData);
+        return res.status(400).json({
+          error: 'Failed to register the phone number for the WhatsApp API.',
+          details: registerData.error?.message || 'The registration endpoint returned an error. This often happens if business verification is still pending.',
         });
       }
+      console.log('SUCCESS at STEP 2: Phone number registered successfully.');
 
-      const phoneData = await phoneResponse.json();
-      const businessPhoneNumber = phoneData.display_phone_number;
 
-      // Register phone number for Cloud API
-      const registerResponse = await fetch(
-        `https://graph.facebook.com/v23.0/${phoneNumberId}/register`,
-        {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${businessToken}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            messaging_product: 'whatsapp',
-            pin: process.env.WHATSAPP_PIN || '123456'
-          })
-        }
-      );
+      // Step 3: Subscribe the WhatsApp Business Account (WABA) to our app's webhooks.
+      console.log(`STEP 3: Subscribing WABA ID (${wabaId}) to our app for webhooks...`);
+      const webhookUrl = `https://graph.facebook.com/v21.0/${wabaId}/subscribed_apps`;
+      const webhookResponse = await fetch(webhookUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${businessToken}`,
+        },
+      });
+      const webhookData = await webhookResponse.json();
 
-      if (!registerResponse.ok) {
-        const error = await registerResponse.json();
-        console.error('Phone registration failed:', error);
-      }
-
-      // Subscribe to webhooks
-      const webhookResponse = await fetch(
-        `https://graph.facebook.com/v23.0/${wabaId}/subscribed_apps`,
-        {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${businessToken}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            subscribed_fields: [
-              'messages',
-              'message_deliveries', 
-              'message_reads',
-              'message_reactions',
-              'messaging_handovers',
-              'account_update'
-            ]
-          })
-        }
-      );
-
-      if (!webhookResponse.ok) {
-        const error = await webhookResponse.json();
-        console.error('Webhook subscription failed:', error);
-      }
-
-      // Save customer to database
-      let customer = await Customer.findOne({ wabaId });
-      
-      if (customer) {
-        customer.phoneNumberId = phoneNumberId;
-        customer.businessPhoneNumber = businessPhoneNumber;
-        customer.businessToken = businessToken;
-        customer.businessPortfolioId = businessPortfolioId;
-        customer.onboardingStatus = 'completed';
-        if (customerInfo) {
-          customer.businessName = customerInfo.businessName || customer.businessName;
-          customer.email = customerInfo.email || customer.email;
-        }
+      // This step is often not critical for initial setup, so we'll log a warning instead of failing the whole process.
+      if (!webhookResponse.ok || !webhookData.success) {
+        console.warn('WARNING at STEP 3: Webhook subscription failed, but continuing onboarding.', webhookData);
       } else {
-        customer = new Customer({
-          wabaId,
-          phoneNumberId,
-          businessPhoneNumber,
-          businessToken,
-          businessPortfolioId,
-          onboardingStatus: 'completed',
-          businessName: customerInfo?.businessName,
-          email: customerInfo?.email
-        });
+        console.log('SUCCESS at STEP 3: Webhook subscription successful.');
       }
 
-      await customer.save();
 
-      res.json({
+      // Step 4: Save or update the customer's information in our database.
+      console.log(`STEP 4: Saving customer data to the database for WABA ID ${wabaId}...`);
+      const customer = await Customer.findOneAndUpdate(
+        { wabaId: wabaId },
+        {
+          phoneNumberId: phoneNumberId,
+          businessToken: businessToken, // IMPORTANT: For a real production app, you should encrypt this token before saving it to the database.
+          businessPortfolioId: businessPortfolioId,
+          onboardingStatus: 'completed',
+        },
+        { new: true, upsert: true } // `upsert: true` creates the document if it doesn't exist
+      );
+      console.log('SUCCESS at STEP 4: Customer onboarded and saved with DB ID:', customer._id);
+
+      // Final success response to the client
+      res.status(200).json({
         success: true,
-        message: 'Customer onboarded successfully',
+        message: 'Customer onboarded successfully! The phone number is now connected.',
         customerId: customer._id,
-        wabaId: customer.wabaId,
-        phoneNumberId: customer.phoneNumberId,
-        businessPhoneNumber: customer.businessPhoneNumber,
-        requiresPayment: true
       });
 
     } catch (error) {
-      console.error('Token exchange error:', error);
+      console.error('FATAL ERROR in exchangeToken controller:', error);
       res.status(500).json({
-        error: 'Failed to onboard customer',
-        details: error.message
+        error: 'An unexpected server error occurred during the onboarding process.',
+        details: error.message,
       });
     }
   }
 
+  /**
+   * Handles incoming webhooks from Meta for both verification and events.
+   */
   async handleWebhook(req, res) {
+    // Handle the webhook verification challenge from Meta
     if (req.method === 'GET') {
       const mode = req.query['hub.mode'];
       const token = req.query['hub.verify_token'];
       const challenge = req.query['hub.challenge'];
 
       if (mode === 'subscribe' && token === process.env.WEBHOOK_VERIFY_TOKEN) {
-        console.log('Webhook verified successfully');
-        res.status(200).send(challenge);
+        console.log('WEBHOOK_VERIFIED: Verification successful.');
+        return res.status(200).send(challenge);
       } else {
-        console.error('Webhook verification failed');
-        res.sendStatus(403);
-      }
-    } else {
-      try {
-        const body = req.body;
-        console.log('Webhook received:', JSON.stringify(body, null, 2));
-
-        if (body.object === 'whatsapp_business_account') {
-          for (const entry of body.entry) {
-            for (const change of entry.changes) {
-              if (change.field === 'messages') {
-                console.log('Message received:', change.value);
-              } else if (change.field === 'account_update') {
-                console.log('Account update:', change.value);
-              }
-            }
-          }
-        }
-
-        res.sendStatus(200);
-      } catch (error) {
-        console.error('Webhook processing error:', error);
-        res.sendStatus(500);
+        console.error('WEBHOOK_VERIFICATION_FAILED: Tokens do not match.');
+        return res.sendStatus(403); // Forbidden
       }
     }
+
+    // Handle incoming event notifications
+    if (req.method === 'POST') {
+      try {
+        const body = req.body;
+        console.log('Webhook event received:', JSON.stringify(body, null, 2));
+
+        // Process the webhook payload here (e.g., save incoming messages, update status, etc.)
+        // Your logic to handle different types of notifications would go here.
+
+        return res.sendStatus(200); // Acknowledge receipt of the event
+      } catch (error) {
+        console.error('Error processing webhook event:', error);
+        return res.sendStatus(500); // Internal Server Error
+      }
+    }
+
+    // If method is not GET or POST
+    res.sendStatus(405); // Method Not Allowed
   }
 
+  /**
+   * Retrieves the status and details of an onboarded customer from the database.
+   */
   async getCustomerStatus(req, res) {
     try {
       const { customerId } = req.params;
       
+      // Find customer but exclude the sensitive business token from the response
       const customer = await Customer.findById(customerId).select('-businessToken');
       
       if (!customer) {
-        return res.status(404).json({ error: 'Customer not found' });
+        return res.status(404).json({ error: 'Customer not found.' });
       }
 
-      res.json({
+      res.status(200).json({
         success: true,
-        customer: customer
+        customer: customer,
       });
     } catch (error) {
-      console.error('Get customer error:', error);
-      res.status(500).json({ error: error.message });
+      console.error('Error retrieving customer status:', error);
+      res.status(500).json({ error: 'Failed to retrieve customer status.', details: error.message });
     }
   }
 }
